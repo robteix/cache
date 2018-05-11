@@ -1,8 +1,14 @@
 package cache
 
 import (
+	"bytes"
 	"container/list"
+	"encoding/binary"
+	"encoding/gob"
+	"fmt"
+	"hash/fnv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,23 +19,22 @@ type Cache struct {
 	cap int           // the capacity. If 0, there is no limit
 	ttu time.Duration // time-to-use. If 0, no expiration time.
 
-	mu  sync.RWMutex // protects the following fields
-	l   *list.List
-	idx map[interface{}]*list.Element // the list index
-}
+	initOnce sync.Once // ensure lazy init runs only once
 
-// cacheEntry keeps the keyval and the last used time
-type cacheEntry struct {
-	key, val interface{}
-	lu       time.Time // last used time
+	len int64 // current number of elements held
+
+	l        *list.List
+	deleteCh chan *Element
+	frontCh  chan *Element
+	done     chan struct{}
+
+	shards    []*shard
+	numShards int32
 }
 
 // New creates a new cache with the provided max number of entries and ttl.
 func New(opts ...Option) *Cache {
-	c := &Cache{
-		l:   list.New(),
-		idx: make(map[interface{}]*list.Element),
-	}
+	c := &Cache{}
 
 	for _, o := range opts {
 		o.apply(c)
@@ -38,20 +43,56 @@ func New(opts ...Option) *Cache {
 	return c
 }
 
-// init ensures the object is initialized
-func (c *Cache) init() {
-	if c.l == nil {
+// lazyInit ensures the object is initialized
+func (c *Cache) lazyInit() {
+	c.initOnce.Do(func() {
 		c.l = list.New()
-		c.idx = make(map[interface{}]*list.Element)
+		c.numShards = 100 // fixed for now
+		c.shards = make([]*shard, c.numShards)
+		c.frontCh = make(chan *Element, 10000)
+		c.deleteCh = make(chan *Element, 10000)
+		c.done = make(chan struct{})
+
+		for i := 0; i < int(c.numShards); i++ {
+			c.shards[i] = &shard{
+				idx: make(map[interface{}]*Element),
+			}
+		}
+		go c.listWorker()
+	})
+}
+
+// Stop will stop the cache.
+func (c *Cache) Stop() {
+	close(c.done)
+}
+
+// the listWorker is responsable for manipulating the list containing the elements.
+func (c *Cache) listWorker() {
+	for {
+		select {
+		case el := <-c.deleteCh:
+			if el.el != nil {
+				c.l.Remove(el.el)
+				c.len--
+			}
+		case el := <-c.frontCh:
+			el.el = c.l.PushFront(el)
+			c.len++
+		case _, ok := <-c.done:
+			if !ok {
+				return
+			}
+		}
 	}
 }
 
-// Len returns the number of entries currently held in the cache
+// Len returns the number of items currently held in the cache. This is an
+// approximation, as the exact number of items is counted asynchronosly when the
+// worker processes items
 func (c *Cache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	c.init()
-	return c.l.Len()
+	len := atomic.LoadInt64(&c.len)
+	return int(len)
 }
 
 // Cap returns the capacity of this cache
@@ -63,20 +104,13 @@ func (c *Cache) TTU() time.Duration { return c.ttu }
 // Add adds the new keyval pair to the cache. If the key is already present, it
 // is updated
 func (c *Cache) Add(key, val interface{}) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.init()
+	c.lazyInit()
 
-	// check if already in the cache?
-	if el, ok := c.idx[key]; ok {
-		c.l.MoveToFront(el)
-		el.Value.(*cacheEntry).val = val
-		el.Value.(*cacheEntry).lu = time.Now()
-		return
+	el, old := c.shard(key).set(key, val)
+	if old != nil {
+		c.deleteCh <- old
 	}
-
-	el := c.l.PushFront(&cacheEntry{key, val, time.Now()})
-	c.idx[key] = el
+	c.frontCh <- el
 
 	// see if we're over capacity
 	if c.cap > 0 && c.l.Len() > c.cap {
@@ -87,37 +121,67 @@ func (c *Cache) Add(key, val interface{}) {
 // Remove removes an entry from the cache from its key. It returns the cached
 // value or nil if not present.
 func (c *Cache) Remove(key interface{}) interface{} {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.init()
-	if el, found := c.idx[key]; found {
-		_, value := c.remove(el)
-		return value
+	c.lazyInit()
+
+	el := c.shard(key).remove(key)
+	if el != nil {
+		c.deleteCh <- el
 	}
-	return nil
+	return el
 }
 
 // Get retrieves an element from the cache. It also returns a second value
 // indicating whether the key was found
 func (c *Cache) Get(key interface{}) (value interface{}, ok bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	c.init()
+	c.lazyInit()
 
-	if el, found := c.idx[key]; found && !c.expired(el.Value.(*cacheEntry)) {
-		c.l.MoveToFront(el)
-		el.Value.(*cacheEntry).lu = time.Now()
-		return el.Value.(*cacheEntry).val, true
+	el := c.shard(key).get(key)
+	if el != nil && !c.expired(el) {
+		c.frontCh <- el
+		return el.val, true
 	}
 
 	return nil, false
 }
 
+// shard returns a shard based on the key's hash
+func (c *Cache) shard(key interface{}) *shard {
+	h := fnv.New32a()
+
+	// we need to turn the key into a byte array. The gob.Encoder is slow, so we
+	// try to isolate some common types so we can do a faster conversion if we
+	// can
+	switch v := key.(type) {
+	case string:
+		h.Write([]byte(v))
+	case []byte:
+		h.Write(v)
+	case *bool, bool, []bool, *int8, int8, []int8, *uint8,
+		uint8, *int16, int16, []int16, *uint16,
+		uint16, []uint16, *int32, int32, []int32, *uint32, uint32, []uint32,
+		*int64, int64, []int64, *uint64, uint64, []uint64:
+		var buf bytes.Buffer
+		if err := binary.Write(&buf, binary.LittleEndian, v); err != nil {
+			panic(fmt.Sprintf("could not encode %v as bytes", v))
+		}
+		h.Write(buf.Bytes())
+	default:
+		// this is slow
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		err := enc.Encode(v)
+		if err != nil {
+			panic(fmt.Sprintf("could not encode type %T as bytes", key))
+		}
+		h.Write(buf.Bytes())
+	}
+
+	return c.shards[h.Sum32()&uint32(c.numShards-1)]
+}
+
 // Purge will remove entries that are expired
 func (c *Cache) Purge() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.init()
+	c.lazyInit()
 
 	if c.l.Len() == 0 {
 		return 0
@@ -125,15 +189,19 @@ func (c *Cache) Purge() int {
 	var expired int
 	if c.ttu != time.Duration(0) {
 		for {
-			el := c.l.Back()
-			if el == nil {
+			b := c.l.Back()
+			if b == nil {
 				break // no more items
 			}
-			ce := el.Value.(*cacheEntry)
-			if !c.expired(ce) {
+			el := b.Value.(*Element)
+			if !c.expired(el) {
 				break // no more expired items
 			}
-			c.remove(el)
+			el = c.shard(el.key).remove(el.key)
+			if el != nil {
+				c.deleteCh <- el
+			}
+
 			expired++
 		}
 	}
@@ -142,24 +210,20 @@ func (c *Cache) Purge() int {
 
 // removes the oldest element in the cache. Caller must hold the mutex for writing
 func (c *Cache) removeOldest() (key, value interface{}) {
-	el := c.l.Back()
-	if el == nil {
+	b := c.l.Back()
+	if b == nil {
 		return
 	}
 
-	return c.remove(el)
-}
+	el := b.Value.(*Element)
+	c.Remove(el.key)
 
-func (c *Cache) remove(el *list.Element) (key, value interface{}) {
-	c.l.Remove(el)
-	e := el.Value.(*cacheEntry)
-	delete(c.idx, e.key)
-	return e.key, e.val
+	return el.key, el.val
 }
 
 // helper function to check if a cacheEntry is expired. Caller should hold the
 // mutex for reading
-func (c *Cache) expired(ce *cacheEntry) bool {
+func (c *Cache) expired(ce *Element) bool {
 	if c.ttu == time.Duration(0) {
 		return false // no expiration
 	}
@@ -175,8 +239,6 @@ func (c *Cache) expired(ce *cacheEntry) bool {
 // must lock the entire cache while it purges the cache. Since the Cache will
 // ignore expired items, the need for frequent purges is greatly reduced.
 func (c *Cache) StartPurger(freq time.Duration) (stop func()) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	if c.ttu == time.Duration(0) {
 		return func() {} // we don't need a purger if we don't have expiration
 	}

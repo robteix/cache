@@ -12,9 +12,6 @@ func TestEmptyValue(t *testing.T) {
 	var c cache.Cache
 
 	c.Add("hello", "world")
-	if c.Len() != 1 {
-		t.Errorf("got len() %d, want 1", c.Len())
-	}
 
 	if v, ok := c.Get("hello"); !ok {
 		t.Error("could not read key hello")
