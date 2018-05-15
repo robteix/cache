@@ -54,4 +54,19 @@
 //   c :=  cache.New(cache.WithTTU(30 * time.Minute))
 //   stop := c.StartPurger(1 * time.Minute)
 //   defer stop()
+//
+//   Cool-off Period
+//
+//   Cache also allows for setting a cool-off period during which an item is
+//   not moved to the front of the list. This is useful to prevent very hot
+//   items from being moved too often since moving an item to the front
+//   involves locking the underlying list:
+//
+//   c := cache.New(cache.WithCoolOff(10 * time.Minute)
+//
+//   Normally when a item is retrieved from the cache, it is marked as used and
+//   moves to the front of the LRU. If all you need is to keep hot items in the
+//   cache, moving them to the front every single time is unnecessary and
+//   expensive. Depending on the configuration of cache, this cool-off period
+//   could be relatively long thus saving a lot of expensive operations.
 package cache

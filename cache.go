@@ -16,8 +16,9 @@ import (
 // value is a cache with no max number of entries and no TTU. It is safe
 // for concurrent use
 type Cache struct {
-	cap int           // the capacity. If 0, there is no limit
-	ttu time.Duration // time-to-use. If 0, no expiration time.
+	cap     int           // the capacity. If 0, there is no limit
+	ttu     time.Duration // time-to-use. If 0, no expiration time.
+	coolOff time.Duration // time to wait before pushing a value to front
 
 	initOnce sync.Once // ensure lazy init runs only once
 
@@ -137,7 +138,10 @@ func (c *Cache) Get(key interface{}) (value interface{}, ok bool) {
 
 	el := c.shard(key).get(key)
 	if el != nil && !c.expired(el) {
-		c.frontCh <- el
+		// avoid moving to front too often if we have a coolOff
+		if c.coolOff == 0 || time.Since(el.lu) > c.coolOff {
+			c.frontCh <- el
+		}
 		return el.val, true
 	}
 

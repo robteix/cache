@@ -31,3 +31,12 @@ func WithTTU(ttu time.Duration) Option {
 		c.ttu = ttu
 	})
 }
+
+// WithCoolOff configures the cache to have a cool-off period until a cached
+// item will again be moved up front. A cool-off period prevents an item from
+// being moved to front too often unnecessarily.
+func WithCoolOff(coolOff time.Duration) Option {
+	return optionFunc(func(c *Cache) {
+		c.coolOff = coolOff
+	})
+}
