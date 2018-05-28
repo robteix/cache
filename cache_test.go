@@ -140,14 +140,39 @@ func randS(n int) []int {
 	return is
 }
 
+type test struct {
+	name string
+	opts []cache.Option
+}
+
+func mkTests() []test {
+	tests := []test{}
+	for shards := int32(1); shards <= 100; shards *= 10 {
+		for cap := 1000; cap <= 100000; cap *= 10 {
+			tests = append(tests, test{
+				name: fmt.Sprintf("%d-cap-%d-shards", cap, shards),
+				opts: []cache.Option{cache.WithCapacity(cap), cache.WithShards(shards)},
+			})
+		}
+	}
+
+	return tests
+}
+
 func BenchmarkAdd(b *testing.B) {
-	c := cache.New()
+	tests := mkTests()
 
-	s := randS(b.N)
+	for _, tst := range tests {
+		b.Run(tst.name, func(b *testing.B) {
+			opts := append([]cache.Option{cache.WithShards(1000)}, tst.opts...)
+			c := cache.New(opts...)
+			s := randS(b.N)
 
-	b.ResetTimer()
-	for n := 0; n < b.N; n++ {
-		c.Add(s[n], s[n])
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				c.Add(s[n], s[n])
+			}
+		})
 	}
 }
 
@@ -161,21 +186,7 @@ func (bi byterInt) Bytes() []byte {
 }
 
 func BenchmarkGet(b *testing.B) {
-	type test struct {
-		name string
-		opts []cache.Option
-	}
-	tests := []test{}
-
-	for shards := int32(1); shards <= 100; shards *= 10 {
-		for cap := 1000; cap <= 100000; cap *= 10 {
-			tests = append(tests, test{
-				name: fmt.Sprintf("%d-cap-%d-shards", cap, shards),
-				opts: []cache.Option{cache.WithCapacity(cap), cache.WithShards(shards)},
-			})
-		}
-	}
-
+	tests := mkTests()
 	for _, tst := range tests {
 		b.Run(tst.name, func(b *testing.B) {
 			opts := append([]cache.Option{cache.WithShards(1000)}, tst.opts...)
