@@ -154,24 +154,32 @@ func BenchmarkAdd(b *testing.B) {
 // exists to prevent the compiler from optimizing c.Get calls away
 var result int
 
-func BenchmarkGet(b *testing.B) {
-	c := cache.New()
+type byterInt int64
 
-	tests := []struct {
+func (bi byterInt) Bytes() []byte {
+	return []byte{1, 2, 3, 4}
+}
+
+func BenchmarkGet(b *testing.B) {
+	type test struct {
 		name string
 		opts []cache.Option
-	}{
-		{"no opts", nil},
-		{"1s-exp", []cache.Option{cache.WithTTU(1 * time.Second)}},
-		{"2s-exp", []cache.Option{cache.WithTTU(2 * time.Second)}},
-		{"10-cap", []cache.Option{cache.WithCapacity(10)}},
-		{"1000-cap", []cache.Option{cache.WithCapacity(1000)}},
-		{"10000-cap", []cache.Option{cache.WithCapacity(10000)}},
-		{"100000-cap", []cache.Option{cache.WithCapacity(100000)}},
+	}
+	tests := []test{}
+
+	for shards := int32(1); shards <= 100; shards *= 10 {
+		for cap := 1000; cap <= 100000; cap *= 10 {
+			tests = append(tests, test{
+				name: fmt.Sprintf("%d-cap-%d-shards", cap, shards),
+				opts: []cache.Option{cache.WithCapacity(cap), cache.WithShards(shards)},
+			})
+		}
 	}
 
 	for _, tst := range tests {
 		b.Run(tst.name, func(b *testing.B) {
+			opts := append([]cache.Option{cache.WithShards(1000)}, tst.opts...)
+			c := cache.New(opts...)
 			s := randS(b.N)
 			for n := 0; n < b.N; n++ {
 				c.Add(s[n], s[n])
@@ -182,43 +190,6 @@ func BenchmarkGet(b *testing.B) {
 			var r int
 			for n := 0; n < b.N; n++ {
 				i, ok := c.Get(s[n])
-				if ok {
-					r = i.(int)
-				}
-			}
-			result += r
-		})
-	}
-}
-
-func BenchmarkGetNotFound(b *testing.B) {
-	c := cache.New()
-
-	tests := []struct {
-		name string
-		opts []cache.Option
-	}{
-		{"no opts", nil},
-		{"1s-exp", []cache.Option{cache.WithTTU(1 * time.Second)}},
-		{"2s-exp", []cache.Option{cache.WithTTU(2 * time.Second)}},
-		{"10-cap", []cache.Option{cache.WithCapacity(10)}},
-		{"1000-cap", []cache.Option{cache.WithCapacity(1000)}},
-		{"10000-cap", []cache.Option{cache.WithCapacity(10000)}},
-		{"100000-cap", []cache.Option{cache.WithCapacity(100000)}},
-	}
-
-	for _, tst := range tests {
-		b.Run(tst.name, func(b *testing.B) {
-			s := randS(b.N)
-			for n := 0; n < b.N; n++ {
-				c.Add(s[n], s[n])
-			}
-
-			b.ResetTimer()
-
-			var r int
-			for n := 0; n < b.N; n++ {
-				i, ok := c.Get(n)
 				if ok {
 					r = i.(int)
 				}

@@ -16,11 +16,22 @@ func (f optionFunc) apply(c *Cache) {
 	f(c)
 }
 
-// WithCapacity configures the max capacity of the cache. If cap is 0, then
+// WithCapacity configures the max capacity of each shard. If cap is 0, then
 // there is no set capacity and the cache will grow indefinely
 func WithCapacity(cap int) Option {
 	return optionFunc(func(c *Cache) {
 		c.cap = cap
+	})
+}
+
+// WithShards configures the number of shards to split the cache. This number
+// must be larger than 0. By default, the cache uses a single shard.
+func WithShards(n int32) Option {
+	return optionFunc(func(c *Cache) {
+		if n < 1 {
+			panic("the number of shards must be larger than 0")
+		}
+		c.nshards = n
 	})
 }
 
