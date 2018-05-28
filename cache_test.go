@@ -2,6 +2,7 @@ package cache_test
 
 import (
 	"fmt"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -119,9 +120,9 @@ func ExampleCache_StartPurger() {
 	// 100 due to the capacity limit
 	fmt.Println("Len:", c.Len())
 
-	// wait 2 seconds for the purger to remove expired items (all of them as the
+	// wait for the purger to remove expired items (all of them as the
 	// TTU was 1s)
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	// now Len() is 0 as all entries have expired and were automatically purged
 	fmt.Println("Len:", c.Len())
@@ -129,11 +130,24 @@ func ExampleCache_StartPurger() {
 	// Len: 0
 }
 
+// creates a slice of random ints
+func randS(n int) []int {
+	is := make([]int, n)
+	for i := 0; i < n; i++ {
+		is[i] = rand.Int()
+	}
+
+	return is
+}
+
 func BenchmarkAdd(b *testing.B) {
 	c := cache.New()
 
+	s := randS(b.N)
+
+	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		c.Add(n, n)
+		c.Add(s[n], s[n])
 	}
 }
 
@@ -143,18 +157,73 @@ var result int
 func BenchmarkGet(b *testing.B) {
 	c := cache.New()
 
-	for n := 0; n < b.N; n++ {
-		c.Add(n, n)
+	tests := []struct {
+		name string
+		opts []cache.Option
+	}{
+		{"no opts", nil},
+		{"1s-exp", []cache.Option{cache.WithTTU(1 * time.Second)}},
+		{"2s-exp", []cache.Option{cache.WithTTU(2 * time.Second)}},
+		{"10-cap", []cache.Option{cache.WithCapacity(10)}},
+		{"1000-cap", []cache.Option{cache.WithCapacity(1000)}},
+		{"10000-cap", []cache.Option{cache.WithCapacity(10000)}},
+		{"100000-cap", []cache.Option{cache.WithCapacity(100000)}},
 	}
 
-	var r int
-	b.Run("c", func(b *testing.B) {
-		for n := 0; n < b.N; n++ {
-			i, ok := c.Get(n)
-			if ok {
-				r = i.(int)
+	for _, tst := range tests {
+		b.Run(tst.name, func(b *testing.B) {
+			s := randS(b.N)
+			for n := 0; n < b.N; n++ {
+				c.Add(s[n], s[n])
 			}
-		}
-	})
-	result = r
+
+			b.ResetTimer()
+
+			var r int
+			for n := 0; n < b.N; n++ {
+				i, ok := c.Get(s[n])
+				if ok {
+					r = i.(int)
+				}
+			}
+			result += r
+		})
+	}
+}
+
+func BenchmarkGetNotFound(b *testing.B) {
+	c := cache.New()
+
+	tests := []struct {
+		name string
+		opts []cache.Option
+	}{
+		{"no opts", nil},
+		{"1s-exp", []cache.Option{cache.WithTTU(1 * time.Second)}},
+		{"2s-exp", []cache.Option{cache.WithTTU(2 * time.Second)}},
+		{"10-cap", []cache.Option{cache.WithCapacity(10)}},
+		{"1000-cap", []cache.Option{cache.WithCapacity(1000)}},
+		{"10000-cap", []cache.Option{cache.WithCapacity(10000)}},
+		{"100000-cap", []cache.Option{cache.WithCapacity(100000)}},
+	}
+
+	for _, tst := range tests {
+		b.Run(tst.name, func(b *testing.B) {
+			s := randS(b.N)
+			for n := 0; n < b.N; n++ {
+				c.Add(s[n], s[n])
+			}
+
+			b.ResetTimer()
+
+			var r int
+			for n := 0; n < b.N; n++ {
+				i, ok := c.Get(n)
+				if ok {
+					r = i.(int)
+				}
+			}
+			result += r
+		})
+	}
 }
