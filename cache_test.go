@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rselbach/cache"
+	"github.com/robteix/cache"
 )
 
 func TestEmptyValue(t *testing.T) {
